@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>本地番茄控制台</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='18' fill='%23a44d1d'/%3E%3Cpath d='M18 18h28v8H36v24h-8V26H18z' fill='%23fff3e3'/%3E%3C/svg%3E">
+    <link rel="stylesheet" href="/static/style.css">
+  </head>
+  <body>
+    <main class="page-shell">
+      <div id="noticeBar" class="notice-bar hidden" role="status" aria-live="polite"></div>
+      <section class="hero-panel">
+        <div class="hero-copy">
+          <div class="hero-kicker">Local Fanqie Console</div>
+          <h1>单机番茄控制台</h1>
+          <p class="hero-lead">在这台 Mac 上直接管理书籍解析、登录态同步、下载队列和结果文件。输入任意书页、章节页或 ID，都能自动归一到正确书籍。</p>
+        </div>
+        <div class="hero-aside">
+          <div class="hero-chip">
+            <span class="hero-chip-label">默认输出</span>
+            <span class="hero-chip-value" id="heroOutputDir">加载中…</span>
+          </div>
+          <div class="hero-chip">
+            <span class="hero-chip-label">当前会话</span>
+            <span class="hero-chip-value" id="heroSessionState">检测中…</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="dashboard-grid">
+        <article class="panel session-panel">
+          <div class="panel-header">
+            <div>
+              <div class="panel-eyebrow">Session</div>
+              <h2>登录态</h2>
+            </div>
+            <div class="button-row compact">
+              <button id="openLoginButton" class="secondary">打开番茄登录页</button>
+              <a id="downloadExtensionLink" class="button-link ghost" href="/api/extension-download">Cookie 插件下载</a>
+              <button id="refreshSessionButton" class="ghost">检测是否失效</button>
+              <button id="clearCookieButton" class="ghost">清空登录态</button>
+            </div>
+          </div>
+          <div id="sessionSummary" class="session-summary">会话状态加载中…</div>
+          <div class="session-inputs">
+            <textarea id="cookieInput" rows="5" placeholder="粘贴原始 Cookie，或粘贴 Chrome 插件导出的 JSON"></textarea>
+            <div class="button-row">
+              <button id="saveCookieButton">保存并校验登录态</button>
+            </div>
+          </div>
+        </article>
+
+        <article class="panel ingest-panel">
+          <div class="panel-header">
+            <div>
+              <div class="panel-eyebrow">Target</div>
+              <h2>书籍入口</h2>
+            </div>
+          </div>
+          <label for="targetInput">书籍链接、章节链接或番茄 ID</label>
+          <input id="targetInput" type="text" placeholder="https://fanqienovel.com/page/... / https://fanqienovel.com/reader/... / 7605865147659193369">
+          <label for="outputDirInput">输出目录</label>
+          <input id="outputDirInput" type="text">
+          <div class="button-row">
+            <button id="previewButton">加载详情</button>
+            <button id="downloadButton" class="secondary">加入下载队列</button>
+          </div>
+          <p class="footnote">详情加载支持自动识别章节链接并反查到对应书籍，不再需要手动换链接。</p>
+        </article>
+
+        <article class="panel detail-panel">
+          <div class="panel-header">
+            <div>
+              <div class="panel-eyebrow">Preview</div>
+              <h2>书籍概览</h2>
+            </div>
+          </div>
+          <div id="detailPanel" class="detail-empty">输入书籍链接后点击“加载详情”</div>
+        </article>
+
+        <article class="panel queue-panel">
+          <div class="panel-header">
+            <div>
+              <div class="panel-eyebrow">Queue</div>
+              <h2>任务队列</h2>
+            </div>
+            <div id="queueSummary" class="queue-summary">0 个任务</div>
+          </div>
+          <div id="jobsPanel" class="jobs-empty">暂无任务</div>
+        </article>
+      </section>
+    </main>
+    <script src="/static/app.js"></script>
+  </body>
+  </html>

@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Fanqie Cookie Exporter</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <main class="popup">
+      <div class="eyebrow">Chrome Extension</div>
+      <h1>番茄登录态导出</h1>
+      <p class="hint">在已登录的番茄页面点击下面按钮，一键复制 JSON，然后回到本地下载器直接粘贴。</p>
+
+      <div id="status" class="status">等待导出…</div>
+
+      <div class="button-row">
+        <button id="copyJsonButton">复制 JSON</button>
+        <button id="copyCookieButton" class="secondary">复制原始 Cookie</button>
+      </div>
+
+      <textarea id="output" rows="10" readonly placeholder="导出结果会显示在这里"></textarea>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+  </html>
