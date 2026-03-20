@@ -3,6 +3,7 @@ const dom = {
   heroOutputDir: document.getElementById('heroOutputDir'),
   heroSessionState: document.getElementById('heroSessionState'),
   sessionSummary: document.getElementById('sessionSummary'),
+  syncSessionButton: document.getElementById('syncSessionButton'),
   cookieInput: document.getElementById('cookieInput'),
   saveCookieButton: document.getElementById('saveCookieButton'),
   clearCookieButton: document.getElementById('clearCookieButton'),
@@ -22,6 +23,7 @@ const state = {
   detail: null,
   jobs: [],
   noticeTimer: null,
+  extensionReady: false,
 };
 
 const JOB_STATUS_LABELS = {
@@ -76,8 +78,24 @@ function sessionTone(session) {
   const validation = session?.validation || {};
   if (!session?.configured) return 'idle';
   if (validation.valid) return 'good';
+  if (validation.state === 'unauthenticated') return 'warn';
   if (validation.state === 'expired') return 'bad';
   return 'warn';
+}
+
+function sessionStateLabel(session) {
+  const validation = session?.validation || {};
+  if (validation.valid) return '登录态有效';
+  if (!session?.configured) return '尚未登录';
+  if (validation.state === 'unauthenticated') return '未检测到番茄登录态';
+  return '登录态失效';
+}
+
+function importSourceLabel(source) {
+  const normalized = String(source || '').trim();
+  if (normalized === 'local-chrome') return '本机 Chrome';
+  if (normalized === 'chrome-extension') return 'Cookie 插件';
+  return normalized || '--';
 }
 
 function renderSession() {
@@ -93,6 +111,7 @@ function renderSession() {
   const userName = validation.user_name || '未识别出登录用户';
   const message = validation.message || '未保存登录态';
   const lastImport = session.last_import || {};
+  const profilePath = lastImport.profile_path || '--';
 
   dom.heroOutputDir.textContent = state.config?.default_output_dir || '--';
   dom.heroSessionState.textContent = validation.valid ? `已登录：${userName}` : message;
@@ -102,7 +121,7 @@ function renderSession() {
   dom.sessionSummary.innerHTML = `
     <div class="session-topline">
       <div>
-        <div class="session-state">${validation.valid ? '登录态有效' : (session.configured ? '登录态失效' : '尚未登录')}</div>
+        <div class="session-state">${sessionStateLabel(session)}</div>
         <div class="session-note">${escapeHtml(message)}</div>
       </div>
       <div class="session-user">${escapeHtml(userName)}</div>
@@ -117,12 +136,16 @@ function renderSession() {
         <span class="session-value break">${escapeHtml(session.session_file || '--')}</span>
       </div>
       <div class="session-cell">
-        <span class="session-label">最近导入</span>
-        <span class="session-value">${escapeHtml(lastImport.source || '--')}</span>
+        <span class="session-label">同步来源</span>
+        <span class="session-value">${escapeHtml(importSourceLabel(lastImport.source))}</span>
       </div>
       <div class="session-cell">
         <span class="session-label">最近校验</span>
         <span class="session-value">${escapeHtml(validation.checked_at || '--')}</span>
+      </div>
+      <div class="session-cell session-wide">
+        <span class="session-label">Chrome Profile</span>
+        <span class="session-value break">${escapeHtml(profilePath)}</span>
       </div>
       <div class="session-cell session-wide">
         <span class="session-label">来源页面</span>
@@ -130,6 +153,50 @@ function renderSession() {
       </div>
     </div>
   `;
+}
+
+function extensionRequest(type, payload = {}, timeoutMs = 1800) {
+  const requestId = `fanqie-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      window.removeEventListener('message', onMessage);
+      reject(new Error('未检测到 Cookie 插件，请先安装插件并刷新本页面'));
+    }, timeoutMs);
+
+    function onMessage(event) {
+      const data = event.data || {};
+      if (data.source !== 'fanqie-cookie-exporter' || data.requestId !== requestId) return;
+      clearTimeout(timer);
+      window.removeEventListener('message', onMessage);
+      if (!data.ok || !data.response?.ok) {
+        const error = new Error(data.response?.error || '插件返回失败');
+        error.code = data.response?.code || 'EXTENSION_ERROR';
+        reject(error);
+        return;
+      }
+      resolve(data.response);
+    }
+
+    window.addEventListener('message', onMessage);
+    window.postMessage(
+      {
+        source: 'local-fanqie-console',
+        requestId,
+        type,
+        payload,
+      },
+      '*',
+    );
+  });
+}
+
+async function probeExtension() {
+  try {
+    await extensionRequest('fanqie-bridge-ping', {}, 1000);
+    state.extensionReady = true;
+  } catch {
+    state.extensionReady = false;
+  }
 }
 
 function jobStatusLabel(status) {
@@ -210,6 +277,12 @@ function renderJobs() {
     }
     if (job.can_delete) {
       actionButtons.push(`<button data-action="delete" data-job-id="${job.job_id}" class="ghost small danger">删除</button>`);
+    }
+    if (job.can_open_file) {
+      actionButtons.push(`<button data-action="open-file" data-job-id="${job.job_id}" class="ghost small">打开文件</button>`);
+    }
+    if (job.can_open_folder) {
+      actionButtons.push(`<button data-action="open-folder" data-job-id="${job.job_id}" class="ghost small">打开所在目录</button>`);
     }
 
     return `
@@ -319,6 +392,43 @@ async function handleOpenLogin() {
   showNotice(payload.message, 'info');
 }
 
+async function handleSyncSession() {
+  try {
+    const extension = await extensionRequest('fanqie-export-payload');
+    state.extensionReady = true;
+    state.config = {
+      ...(state.config || {}),
+      session: await api('/api/session/save-cookie', {
+        method: 'POST',
+        body: { cookie: JSON.stringify(extension.payload) },
+      }),
+    };
+    renderSession();
+    showNotice('已从插件同步登录态', 'success');
+  } catch (error) {
+    try {
+      state.config = {
+        ...(state.config || {}),
+        session: await api('/api/session/sync-chrome'),
+      };
+      renderSession();
+      showNotice('插件桥接未响应，已直接从本机 Chrome 同步登录态', 'success');
+      return;
+    } catch (nativeError) {
+      const code = error.code || '';
+      if (code === 'NO_FANQIE_TAB') {
+        showNotice('未找到已打开的番茄网页，请先点“打开番茄登录页”，登录后再同步', 'error');
+        return;
+      }
+      if (code === 'NOT_LOGGED_IN') {
+        showNotice('插件已连接，但当前番茄页面仍未登录。请先登录番茄，再点“同步登录态”', 'error');
+        return;
+      }
+      showNotice(nativeError.message || error.message || '同步登录态失败', 'error');
+    }
+  }
+}
+
 async function handleJobAction(action, jobId) {
   const data = await api(`/api/jobs/${jobId}/${action}`, { method: 'POST', body: {} });
   if (action === 'delete' && data.deleted) {
@@ -331,12 +441,19 @@ async function handleJobAction(action, jobId) {
   }
   renderJobs();
   if (action !== 'delete') {
-    const labels = { pause: '任务已暂停', resume: '任务已继续', pin: '任务顺序已更新' };
+    const labels = {
+      pause: '任务已暂停',
+      resume: '任务已继续',
+      pin: '任务顺序已更新',
+      'open-file': '已打开文件',
+      'open-folder': '已在 Finder 中定位文件',
+    };
     showNotice(labels[action] || '任务状态已更新', 'success');
   }
 }
 
 async function bootstrap() {
+  await probeExtension();
   await loadConfig();
   setInterval(() => {
     refreshJobs().catch((error) => console.error(error));
@@ -364,6 +481,9 @@ dom.clearCookieButton.addEventListener('click', () => {
 });
 dom.openLoginButton.addEventListener('click', () => {
   handleOpenLogin().catch((error) => showNotice(error.message, 'error'));
+});
+dom.syncSessionButton.addEventListener('click', () => {
+  handleSyncSession().catch((error) => showNotice(error.message, 'error'));
 });
 dom.refreshSessionButton.addEventListener('click', () => {
   refreshSession(true)

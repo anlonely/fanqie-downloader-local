@@ -4,12 +4,16 @@ import io
 import json
 import random
 import re
+import shutil
+import sqlite3
 import subprocess
+import tempfile
 import threading
 import time
 import uuid
 import zipfile
 from dataclasses import asdict, dataclass, field
+from hashlib import pbkdf2_hmac
 from html import unescape
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -18,6 +22,8 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
+
+from Cryptodome.Cipher import AES
 
 
 APP_ROOT = Path(__file__).resolve().parent
@@ -31,6 +37,17 @@ EXTENSION_ROOT = APP_ROOT / "chrome_extension_fanqie_cookie"
 DEFAULT_PORT = 18930
 REQUEST_TIMEOUT = 20
 SESSION_VALIDATION_TTL = 180.0
+CHROME_PROFILE_ROOT = Path.home() / "Library/Application Support/Google/Chrome"
+DEBUG_CHROME_PROFILE_ROOT = Path("/tmp/fanqie-debug-profile")
+BROWSER_LOGIN_REQUIRED_COOKIES = {
+    "sessionid",
+    "sessionid_ss",
+    "uid_tt",
+    "uid_tt_ss",
+    "ttwid",
+    "d_ticket",
+    "odin_tt",
+}
 
 
 def now_ts() -> float:
@@ -77,9 +94,15 @@ def parse_cookie_export_text(raw_text: str) -> tuple[str, dict[str, Any]]:
         metadata = {
             "source": str(payload.get("source") or "browser-extension").strip(),
             "page_url": str(payload.get("pageUrl") or payload.get("url") or "").strip(),
+            "profile_path": str(payload.get("profilePath") or "").strip(),
             "user_agent": str(payload.get("userAgent") or "").strip(),
             "exported_at": str(payload.get("exportedAt") or "").strip(),
             "cookie_names": list(payload.get("cookieNames") or []),
+            "login_state": {
+                "has_authentication": bool((payload.get("loginState") or {}).get("hasAuthentication")),
+                "user_name": str((payload.get("loginState") or {}).get("userName") or "").strip(),
+                "avatar": str((payload.get("loginState") or {}).get("avatar") or "").strip(),
+            },
         }
         return cookie_header, metadata
 
@@ -164,6 +187,134 @@ def extract_json_after_marker(text: str, marker: str = "window.__INITIAL_STATE__
                     return json.loads(sanitized)
 
     raise ValueError("页面中的初始化状态 JSON 未闭合")
+
+
+def looks_like_browser_login(cookie_names: list[str] | set[str], login_state: dict[str, Any] | None = None) -> bool:
+    names = set(map(str, cookie_names or []))
+    if login_state and bool(login_state.get("has_authentication")):
+        return True
+    return BROWSER_LOGIN_REQUIRED_COOKIES.issubset(names)
+
+
+def _chrome_safe_storage_key() -> bytes:
+    password = subprocess.check_output(
+        ["security", "find-generic-password", "-s", "Chrome Safe Storage", "-w"],
+        stderr=subprocess.DEVNULL,
+    ).decode("utf-8", errors="ignore").strip()
+    if not password:
+        raise RuntimeError("未能从 macOS Keychain 读取 Chrome Safe Storage")
+    return pbkdf2_hmac("sha1", password.encode("utf-8"), b"saltysalt", 1003, dklen=16)
+
+
+def _decrypt_chrome_cookie_value(encrypted_value: bytes, key: bytes) -> str:
+    if not encrypted_value:
+        return ""
+    if encrypted_value.startswith(b"v10"):
+        payload = encrypted_value[3:]
+        raw = AES.new(key, AES.MODE_CBC, b" " * 16).decrypt(payload)
+        pad = raw[-1]
+        if pad:
+            raw = raw[:-pad]
+        if len(raw) > 32:
+            raw = raw[32:]
+        return raw.decode("utf-8", errors="ignore")
+    return encrypted_value.decode("utf-8", errors="ignore")
+
+
+def _chrome_profile_candidates() -> list[Path]:
+    roots = [CHROME_PROFILE_ROOT, DEBUG_CHROME_PROFILE_ROOT]
+    profiles: list[Path] = []
+    for root in roots:
+        if not root.exists():
+            continue
+        direct = root / "Cookies"
+        if direct.exists():
+            profiles.append(root)
+        default_profile = root / "Default"
+        if default_profile.exists():
+            profiles.append(default_profile)
+        profiles.extend(sorted(path for path in root.glob("Profile *") if path.is_dir()))
+    deduped: list[Path] = []
+    seen: set[str] = set()
+    for profile in profiles:
+        token = str(profile.resolve())
+        if token in seen:
+            continue
+        seen.add(token)
+        deduped.append(profile)
+    return deduped
+
+
+def read_fanqie_cookie_payload_from_local_chrome() -> dict[str, Any]:
+    key = _chrome_safe_storage_key()
+    best_payload: dict[str, Any] | None = None
+    best_score = -1
+
+    for profile_dir in _chrome_profile_candidates():
+        cookies_db = profile_dir / "Cookies"
+        if not cookies_db.exists():
+            continue
+
+        temp_copy = Path(tempfile.mktemp(prefix="fanqie-cookies-", suffix=".sqlite"))
+        try:
+            shutil.copy2(cookies_db, temp_copy)
+            with sqlite3.connect(str(temp_copy)) as connection:
+                rows = connection.execute(
+                    """
+                    select host_key, name, value, encrypted_value
+                    from cookies
+                    where host_key like '%fanqienovel.com%'
+                    order by name
+                    """
+                ).fetchall()
+        except Exception:
+            rows = []
+        finally:
+            try:
+                temp_copy.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+        if not rows:
+            continue
+
+        cookies: dict[str, str] = {}
+        for _host_key, name, value, encrypted_value in rows:
+            plaintext = str(value or "").strip()
+            if not plaintext and encrypted_value:
+                plaintext = _decrypt_chrome_cookie_value(bytes(encrypted_value), key).strip()
+            if plaintext:
+                cookies[str(name)] = plaintext
+
+        if not cookies:
+            continue
+
+        cookie_names = sorted(cookies.keys())
+        score = len(set(cookie_names) & BROWSER_LOGIN_REQUIRED_COOKIES) * 100 + len(cookie_names)
+        if score <= best_score:
+            continue
+
+        best_score = score
+        best_payload = {
+            "source": "local-chrome",
+            "pageUrl": "https://fanqienovel.com/",
+            "title": "",
+            "exportedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "userAgent": "",
+            "cookieNames": cookie_names,
+            "cookieHeader": "; ".join(f"{name}={value}" for name, value in cookies.items()),
+            "loginState": {
+                "hasAuthentication": looks_like_browser_login(cookie_names),
+                "userName": "",
+                "avatar": "",
+            },
+            "profilePath": str(profile_dir),
+        }
+
+    if not best_payload:
+        raise RuntimeError("未从本机 Chrome 读取到 fanqienovel.com Cookie，请先在 Chrome 中登录番茄网页")
+
+    return best_payload
 
 
 def flatten_chapters(chapter_groups: Any) -> list[dict[str, Any]]:
@@ -469,10 +620,20 @@ class FanqieClient:
         state = extract_json_after_marker(html)
         common = state.get("common") if isinstance(state.get("common"), dict) else {}
         authenticated = bool(common.get("hasAuthentication"))
+        if not authenticated:
+            return {
+                "state": "unauthenticated",
+                "valid": False,
+                "message": "已读取到 Cookie，但番茄首页当前仍返回未登录状态。请先在番茄网页确认右上角已出现头像或昵称，再重新同步登录态。",
+                "checked_at": now_text(),
+                "checked_at_ts": now_ts(),
+                "user_name": str(common.get("name") or ""),
+                "avatar": str(common.get("avatar") or ""),
+            }
         return {
-            "state": "valid" if authenticated else "expired",
-            "valid": authenticated,
-            "message": "登录态可用" if authenticated else "登录态已失效，请重新登录并导入 Cookie",
+            "state": "valid",
+            "valid": True,
+            "message": "登录态可用",
             "checked_at": now_text(),
             "checked_at_ts": now_ts(),
             "user_name": str(common.get("name") or ""),
@@ -704,6 +865,8 @@ class DownloadJob:
             "can_resume": self.status == "paused",
             "can_pin": self.status in {"queued", "paused", "failed", "completed", "canceled"},
             "can_delete": self.status not in {"canceling"},
+            "can_open_file": bool(self.result_path and self.status == "completed"),
+            "can_open_folder": bool(self.result_path and self.status == "completed"),
         }
 
     @classmethod
@@ -910,8 +1073,40 @@ class AppState:
             return info
 
         payload = self.client.validate_session()
-        self.session_store.update_validation(payload, auto_clear=not bool(payload.get("valid")))
+        login_state = info.get("last_import", {}).get("login_state") if isinstance(info.get("last_import"), dict) else {}
+        if not bool(payload.get("valid")) and looks_like_browser_login(info.get("cookie_names", []), login_state):
+            payload = {
+                "state": "valid",
+                "valid": True,
+                "message": "已同步浏览器登录态。番茄首页的服务端重放校验未通过，但本机浏览器 Cookie 组合完整，可直接用于本地下载。",
+                "checked_at": now_text(),
+                "checked_at_ts": now_ts(),
+                "user_name": str(login_state.get("user_name") or ""),
+                "avatar": str(login_state.get("avatar") or ""),
+            }
+        self.session_store.update_validation(payload, auto_clear=False)
         return self.session_store.info()
+
+    def sync_session_from_local_chrome(self) -> dict[str, Any]:
+        payload = read_fanqie_cookie_payload_from_local_chrome()
+        self.session_store.save_cookie_header(json.dumps(payload, ensure_ascii=False))
+        info = self.session_store.info()
+        login_state = info.get("last_import", {}).get("login_state") if isinstance(info.get("last_import"), dict) else {}
+        if looks_like_browser_login(info.get("cookie_names", []), login_state):
+            self.session_store.update_validation(
+                {
+                    "state": "valid",
+                    "valid": True,
+                    "message": "已从本机 Chrome 同步登录态，可直接用于本地下载。",
+                    "checked_at": now_text(),
+                    "checked_at_ts": now_ts(),
+                    "user_name": str(login_state.get("user_name") or ""),
+                    "avatar": str(login_state.get("avatar") or ""),
+                },
+                auto_clear=False,
+            )
+            return self.session_store.info()
+        return self.refresh_session(force=True)
 
     def config_payload(self) -> dict[str, Any]:
         return {
@@ -1017,6 +1212,29 @@ class AppState:
             self._save_jobs_locked()
             return {"deleted": True}
 
+    def _result_path_for_job(self, job_id: str) -> Path:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                raise ValueError("任务不存在")
+            result_path = str(job.result_path or "").strip()
+        if not result_path:
+            raise ValueError("当前任务没有可打开的结果文件")
+        path = Path(result_path).expanduser()
+        if not path.exists():
+            raise ValueError("结果文件不存在，可能已被移动或删除")
+        return path
+
+    def open_job_file(self, job_id: str) -> dict[str, Any]:
+        path = self._result_path_for_job(job_id)
+        subprocess.Popen(["open", str(path)])
+        return {"opened": True, "mode": "file", "path": str(path)}
+
+    def open_job_folder(self, job_id: str) -> dict[str, Any]:
+        path = self._result_path_for_job(job_id)
+        subprocess.Popen(["open", "-R", str(path)])
+        return {"opened": True, "mode": "folder", "path": str(path)}
+
     def build_extension_zip(self) -> bytes:
         buffer = io.BytesIO()
         with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
@@ -1103,6 +1321,9 @@ class RequestHandler(BaseHTTPRequestHandler):
             if path == "/api/session/status":
                 self._send_json({"ok": True, "data": APP_STATE.refresh_session(force=True)})
                 return
+            if path == "/api/session/sync-chrome":
+                self._send_json({"ok": True, "data": APP_STATE.sync_session_from_local_chrome()})
+                return
             if path == "/api/extension-download":
                 payload = APP_STATE.build_extension_zip()
                 self._send_bytes("application/zip", payload, filename="fanqie-cookie-exporter.zip")
@@ -1133,8 +1354,24 @@ class RequestHandler(BaseHTTPRequestHandler):
             if path == "/api/session/save-cookie":
                 payload = self._read_json_body()
                 cookie_text = str(payload.get("cookie") or "").strip()
-                APP_STATE.session_store.save_cookie_header(cookie_text)
-                data = APP_STATE.refresh_session(force=True)
+                info = APP_STATE.session_store.save_cookie_header(cookie_text)
+                login_state = info.get("last_import", {}).get("login_state") if isinstance(info.get("last_import"), dict) else {}
+                if looks_like_browser_login(info.get("cookie_names", []), login_state):
+                    APP_STATE.session_store.update_validation(
+                        {
+                            "state": "valid",
+                            "valid": True,
+                            "message": "已从浏览器同步登录态，可直接用于本地下载。",
+                            "checked_at": now_text(),
+                            "checked_at_ts": now_ts(),
+                            "user_name": str(login_state.get("user_name") or ""),
+                            "avatar": str(login_state.get("avatar") or ""),
+                        },
+                        auto_clear=False,
+                    )
+                    data = APP_STATE.session_store.info()
+                else:
+                    data = APP_STATE.refresh_session(force=True)
                 self._send_json({"ok": True, "data": data})
                 return
 
@@ -1176,6 +1413,18 @@ class RequestHandler(BaseHTTPRequestHandler):
             if path.startswith("/api/jobs/") and path.endswith("/delete"):
                 job_id = path.split("/")[3]
                 data = APP_STATE.delete_job(job_id)
+                self._send_json({"ok": True, "data": data})
+                return
+
+            if path.startswith("/api/jobs/") and path.endswith("/open-file"):
+                job_id = path.split("/")[3]
+                data = APP_STATE.open_job_file(job_id)
+                self._send_json({"ok": True, "data": data})
+                return
+
+            if path.startswith("/api/jobs/") and path.endswith("/open-folder"):
+                job_id = path.split("/")[3]
+                data = APP_STATE.open_job_folder(job_id)
                 self._send_json({"ok": True, "data": data})
                 return
 

@@ -195,6 +195,10 @@ h2 {
   gap: 8px;
 }
 
+.secondary-actions {
+  margin: -4px 0 16px;
+}
+
 button,
 .button-link,
 input,

@@ -3,8 +3,18 @@
   "name": "Fanqie Cookie Exporter",
   "version": "1.0.0",
   "description": "一键导出当前番茄登录 Cookie，粘贴到本地下载器使用。",
-  "permissions": ["cookies", "activeTab", "tabs", "clipboardWrite"],
+  "permissions": ["cookies", "activeTab", "tabs", "clipboardWrite", "scripting"],
   "host_permissions": ["https://fanqienovel.com/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://127.0.0.1:18930/*", "http://localhost:18930/*"],
+      "js": ["bridge.js"],
+      "run_at": "document_start"
+    }
+  ],
   "action": {
     "default_title": "导出番茄 Cookie",
     "default_popup": "popup.html"

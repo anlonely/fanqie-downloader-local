@@ -14,7 +14,7 @@
         <div class="hero-copy">
           <div class="hero-kicker">Local Fanqie Console</div>
           <h1>单机番茄控制台</h1>
-          <p class="hero-lead">在这台 Mac 上直接管理书籍解析、登录态同步、下载队列和结果文件。输入任意书页、章节页或 ID，都能自动归一到正确书籍。</p>
+          <p class="hero-lead">这是一个本地个人版番茄下载器，用来在你的 Mac 上同步浏览器登录态、解析番茄书籍与章节链接、管理下载队列，并把小说导出为 TXT 文件。</p>
         </div>
         <div class="hero-aside">
           <div class="hero-chip">
@@ -38,15 +38,18 @@
             <div class="button-row compact">
               <button id="openLoginButton" class="secondary">打开番茄登录页</button>
               <a id="downloadExtensionLink" class="button-link ghost" href="/api/extension-download">Cookie 插件下载</a>
-              <button id="refreshSessionButton" class="ghost">检测是否失效</button>
-              <button id="clearCookieButton" class="ghost">清空登录态</button>
+              <button id="syncSessionButton">同步登录态</button>
             </div>
+          </div>
+          <div class="button-row compact secondary-actions">
+            <button id="refreshSessionButton" class="ghost">检测是否失效</button>
+            <button id="clearCookieButton" class="ghost">清空登录态</button>
           </div>
           <div id="sessionSummary" class="session-summary">会话状态加载中…</div>
           <div class="session-inputs">
             <textarea id="cookieInput" rows="5" placeholder="粘贴原始 Cookie，或粘贴 Chrome 插件导出的 JSON"></textarea>
             <div class="button-row">
-              <button id="saveCookieButton">保存并校验登录态</button>
+              <button id="saveCookieButton" class="ghost">手动粘贴保存</button>
             </div>
           </div>
         </article>

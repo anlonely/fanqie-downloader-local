@@ -10,41 +10,12 @@ function setStatus(message, tone = '') {
   dom.status.textContent = message;
 }
 
-async function getActiveTab() {
-  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-  return tabs[0] || null;
-}
-
-async function getFanqieCookies() {
-  const cookies = await chrome.cookies.getAll({ domain: 'fanqienovel.com' });
-  cookies.sort((a, b) => a.name.localeCompare(b.name));
-  return cookies;
-}
-
-function buildCookieHeader(cookies) {
-  return cookies.map((cookie) => `${cookie.name}=${cookie.value}`).join('; ');
-}
-
 async function buildPayload() {
-  const tab = await getActiveTab();
-  if (!tab || !tab.url || !tab.url.startsWith('https://fanqienovel.com/')) {
-    throw new Error('请先切到番茄网页标签页再导出');
+  const response = await chrome.runtime.sendMessage({ type: 'fanqie-export-payload' });
+  if (!response?.ok || !response.payload) {
+    throw new Error(response?.error || '导出失败');
   }
-
-  const cookies = await getFanqieCookies();
-  if (!cookies.length) {
-    throw new Error('没有读取到 fanqienovel.com Cookie，请确认你已在该网站登录');
-  }
-
-  return {
-    source: 'chrome-extension',
-    pageUrl: tab.url,
-    title: tab.title || '',
-    exportedAt: new Date().toISOString(),
-    userAgent: navigator.userAgent,
-    cookieNames: cookies.map((cookie) => cookie.name),
-    cookieHeader: buildCookieHeader(cookies),
-  };
+  return response.payload;
 }
 
 async function copyText(text) {
